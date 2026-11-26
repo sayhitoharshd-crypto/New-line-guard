@@ -1,0 +1,74 @@
+name: Build LineGuard Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Check app files
+        shell: bash
+        run: |
+          test -f package.json || {
+            echo "ERROR: package.json is not in the repository root."
+            exit 1
+          }
+          echo "=== package.json ==="
+          cat package.json
+          echo "=== pnpm workspace ==="
+          if [ -f pnpm-workspace.yaml ]; then
+            cat pnpm-workspace.yaml
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Check Expo CLI
+        run: pnpm exec expo --version
+
+      - name: Generate Android project
+        env:
+          CI: "1"
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Build release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineguard-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
