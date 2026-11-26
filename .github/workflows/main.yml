@@ -1,4 +1,4 @@
-name: Diagnose LineGuard Android Build
+name: LineGuard Standalone Android APK
 
 on:
   workflow_dispatch:
@@ -6,13 +6,61 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
-  diagnose:
+  build:
+    name: Build Android Release APK
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Extract LineGuard source ZIP
+        id: project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p /tmp/lineguard/source
+          FOUND=false
+
+          for ZIP in ./*.zip; do
+            [ -f "$ZIP" ] || continue
+            TEMP="/tmp/lineguard/candidate"
+            rm -rf "$TEMP"
+            mkdir -p "$TEMP"
+
+            if unzip -q "$ZIP" -d "$TEMP" 2>/dev/null; then
+              APP_JSON=$(find "$TEMP" -path '*/artifacts/lineguard/app.json' -print -quit)
+
+              if [ -n "$APP_JSON" ]; then
+                cp -a "$TEMP/." /tmp/lineguard/source/
+                FOUND=true
+                echo "Found source ZIP: $ZIP"
+                break
+              fi
+            fi
+          done
+
+          if [ "$FOUND" != "true" ]; then
+            echo "Could not find a ZIP containing artifacts/lineguard/app.json."
+            exit 1
+          fi
+
+          APP_JSON=$(find /tmp/lineguard/source -path '*/artifacts/lineguard/app.json' -print -quit)
+          APP_DIR=$(dirname "$APP_JSON")
+          ROOT_DIR=$(find /tmp/lineguard/source -name pnpm-workspace.yaml -printf '%h\n' -quit)
+
+          if [ -z "$ROOT_DIR" ]; then
+            echo "Could not find pnpm-workspace.yaml."
+            exit 1
+          fi
+
+          echo "app=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "root=$ROOT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -20,41 +68,97 @@ jobs:
           node-version: 22
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
 
-      - name: Show repository files and pnpm configuration
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Android SDK
         shell: bash
         run: |
-          echo "===== REPOSITORY ROOT ====="
-          pwd
-          ls -la
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-          echo "===== ROOT package.json ====="
-          if [ -f package.json ]; then
-            cat package.json
-          else
-            echo "No package.json at repository root"
+          SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort | tail -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android SDK manager not found."
+            exit 1
           fi
 
-          echo "===== ROOT pnpm-workspace.yaml ====="
-          if [ -f pnpm-workspace.yaml ]; then
-            cat pnpm-workspace.yaml
-          else
-            echo "No pnpm-workspace.yaml at repository root"
+          echo "Using SDK manager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install "platform-tools"
+
+      - name: Install dependencies
+        working-directory: ${{ steps.project.outputs.root }}
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Generate Android project
+        working-directory: ${{ steps.project.outputs.app }}
+        env:
+          CI: "1"
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Remove unnecessary Foojay resolver
+        working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
+        run: |
+          if [ -f settings.gradle ]; then
+            sed -i '/foojay-resolver-convention/d' settings.gradle
           fi
 
-          echo "===== PNPM VERSION ====="
-          pnpm --version
+      - name: Show build environment
+        working-directory: ${{ steps.project.outputs.app }}/android
+        run: |
+          java -version
+          ./gradlew --version
+          echo "Android SDK: ${ANDROID_HOME:-not set}"
 
-          echo "===== ALL PACKAGE MANIFESTS ====="
-          find . \
-            -type d \( -name node_modules -o -name .git \) -prune \
-            -o -type f -name package.json -print
+      - name: Build release APK with diagnostics
+        working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            --warning-mode all
 
-          echo "===== FILES REFERENCING @types/node ====="
-          grep -R -n --include="package.json" --include="pnpm-workspace.yaml" \
-            "@types/node" . \
-            --exclude-dir=node_modules \
-            --exclude-dir=.git || true
+      - name: Verify APK and embedded JavaScript bundle
+        working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
+        run: |
+          set -e
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: Release APK was not generated."
+            exit 1
+          fi
+
+          if ! unzip -l "$APK" | grep -q 'assets/index.android.bundle'; then
+            echo "ERROR: Embedded JavaScript bundle not found."
+            unzip -l "$APK" | head -100
+            exit 1
+          fi
+
+          echo "Standalone APK verified."
+          ls -lh "$APK"
+          sha256sum "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineGuard-Release-APK
+          path: ${{ steps.project.outputs.app }}/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
