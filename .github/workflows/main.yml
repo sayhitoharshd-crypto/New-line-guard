@@ -1,4 +1,4 @@
-name: Build LineGuard Android APK
+name: Diagnose LineGuard Android Build
 
 on:
   workflow_dispatch:
@@ -6,69 +6,55 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: 22
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10"
+          version: 10
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Check app files
+      - name: Show repository files and pnpm configuration
         shell: bash
         run: |
-          test -f package.json || {
-            echo "ERROR: package.json is not in the repository root."
-            exit 1
-          }
-          echo "=== package.json ==="
-          cat package.json
-          echo "=== pnpm workspace ==="
-          if [ -f pnpm-workspace.yaml ]; then
-            cat pnpm-workspace.yaml
+          echo "===== REPOSITORY ROOT ====="
+          pwd
+          ls -la
+
+          echo "===== ROOT package.json ====="
+          if [ -f package.json ]; then
+            cat package.json
+          else
+            echo "No package.json at repository root"
           fi
 
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+          echo "===== ROOT pnpm-workspace.yaml ====="
+          if [ -f pnpm-workspace.yaml ]; then
+            cat pnpm-workspace.yaml
+          else
+            echo "No pnpm-workspace.yaml at repository root"
+          fi
 
-      - name: Check Expo CLI
-        run: pnpm exec expo --version
+          echo "===== PNPM VERSION ====="
+          pnpm --version
 
-      - name: Generate Android project
-        env:
-          CI: "1"
-        run: pnpm exec expo prebuild --platform android --clean --no-install
+          echo "===== ALL PACKAGE MANIFESTS ====="
+          find . \
+            -type d \( -name node_modules -o -name .git \) -prune \
+            -o -type f -name package.json -print
 
-      - name: Build release APK
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: lineguard-release-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-          retention-days: 14
+          echo "===== FILES REFERENCING @types/node ====="
+          grep -R -n --include="package.json" --include="pnpm-workspace.yaml" \
+            "@types/node" . \
+            --exclude-dir=node_modules \
+            --exclude-dir=.git || true
