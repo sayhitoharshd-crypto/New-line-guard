@@ -105,6 +105,7 @@ jobs:
         working-directory: ${{ steps.project.outputs.app }}
         env:
           CI: "1"
+          EXPO_PUBLIC_YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Remove unnecessary Foojay resolver
@@ -125,8 +126,18 @@ jobs:
       - name: Build release APK with diagnostics
         working-directory: ${{ steps.project.outputs.app }}/android
         shell: bash
+        env:
+          EXPO_PUBLIC_YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
+          set -e
+
+          if [ -z "$EXPO_PUBLIC_YOUTUBE_API_KEY" ]; then
+            echo "ERROR: GitHub secret YOUTUBE_API_KEY is missing or empty."
+            exit 1
+          fi
+
           chmod +x gradlew
+
           ./gradlew assembleRelease \
             --no-daemon \
             --stacktrace \
